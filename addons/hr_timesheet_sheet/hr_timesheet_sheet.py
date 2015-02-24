@@ -232,13 +232,25 @@ class hr_timesheet_sheet(osv.osv):
         return True
 
     def name_get(self, cr, uid, ids, context=None):
+        user = self.pool['res.users'].browse(cr, uid, uid, context=context)
+        tm_range = user.company_id.timesheet_range or 'month'
+        if tm_range == 'week':
+            tformat = _('Week %U')
+        elif tm_range == 'month':
+            tformat = _('Month %m')
+        elif tm_range == 'day':
+            tformat = user.lang.date_format if user.lang.date_format else '%Y-%m-%d'
+        else:
+            raise ValueError(_('Unsupported timesheet range: %s') % tm_range)
         if not ids:
             return []
         if isinstance(ids, (long, int)):
             ids = [ids]
-        return [(r['id'], _('Week ')+datetime.strptime(r['date_from'], '%Y-%m-%d').strftime('%U')) \
+        return [(r['id'],
+                 datetime.strptime(r['date_from'],
+                                   '%Y-%m-%d').strftime(tformat))
                 for r in self.read(cr, uid, ids, ['date_from'],
-                    context=context, load='_classic_write')]
+                                   context=context, load='_classic_write')]
 
     def unlink(self, cr, uid, ids, context=None):
         sheets = self.read(cr, uid, ids, ['state','total_attendance'], context=context)
@@ -298,7 +310,8 @@ class hr_timesheet_line(osv.osv):
         for ts_line in self.browse(cursor, user, ids, context=context):
             sheet_ids = sheet_obj.search(cursor, user,
                 [('date_to', '>=', ts_line.date), ('date_from', '<=', ts_line.date),
-                 ('employee_id.user_id', '=', ts_line.user_id.id)],
+                 ('employee_id.user_id', '=', ts_line.user_id.id),
+                 ('state', 'in', ['draft', 'new'])],
                 context=context)
             if sheet_ids:
             # [0] because only one sheet possible for an employee between 2 dates
@@ -570,16 +583,24 @@ class hr_timesheet_sheet_sheet_day(osv.osv):
                         ) union (
                             select
                                 -min(a.id) as id,
-                                a.name::date as name,
+                                (a.name AT TIME ZONE 'UTC' AT TIME ZONE coalesce(p.tz, 'UTC'))::date as name,
                                 s.id as sheet_id,
                                 0.0 as total_timesheet,
-                                SUM(((EXTRACT(hour FROM a.name) * 60) + EXTRACT(minute FROM a.name)) * (CASE WHEN a.action = 'sign_in' THEN -1 ELSE 1 END)) as total_attendance
+                                SUM(((EXTRACT(hour FROM (a.name AT TIME ZONE 'UTC' AT TIME ZONE coalesce(p.tz, 'UTC'))) * 60) + EXTRACT(minute FROM (a.name AT TIME ZONE 'UTC' AT TIME ZONE coalesce(p.tz, 'UTC')))) * (CASE WHEN a.action = 'sign_in' THEN -1 ELSE 1 END)) as total_attendance
                             from
                                 hr_attendance a
                                 LEFT JOIN hr_timesheet_sheet_sheet s
                                 ON s.id = a.sheet_id
+                                JOIN hr_employee e
+                                ON a.employee_id = e.id
+                                JOIN resource_resource r
+                                ON e.resource_id = r.id
+                                LEFT JOIN res_users u
+                                ON r.user_id = u.id
+                                LEFT JOIN res_partner p
+                                ON u.partner_id = p.id
                             WHERE action in ('sign_in', 'sign_out')
-                            group by a.name::date, s.id
+                            group by (a.name AT TIME ZONE 'UTC' AT TIME ZONE coalesce(p.tz, 'UTC'))::date, s.id
                         )) AS foo
                         GROUP BY name, sheet_id
                 )) AS bar""")
